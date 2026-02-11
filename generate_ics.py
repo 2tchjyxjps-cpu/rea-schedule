@@ -17,10 +17,13 @@ CANDIDATES = [
     ("GET",  "https://rasp.rea.ru/Schedule/ScheduleCard"),
 ]
 
+BASE_URL = "https://rasp.rea.ru/?q=15.24д-мен01/24б"
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "X-Requested-With": "XMLHttpRequest",
-    "Accept": "*/*",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": BASE_URL,
 }
 
 def fetch_week_html(week_num: int | None):
