@@ -5,184 +5,138 @@ from datetime import datetime
 from ics import Calendar, Event
 import pytz
 
+# ================= НАСТРОЙКИ =================
+
 SKEY = "15.24д-мен01/24б"
+BASE_PAGE = f"https://rasp.rea.ru/?q={SKEY}"
+SCHEDULE_URL = "https://rasp.rea.ru/ScheduleCard"
 TZ = pytz.timezone("Europe/Moscow")
-
-CANDIDATES = [
-    ("POST", "https://rasp.rea.ru/ScheduleCard"),
-    ("GET",  "https://rasp.rea.ru/ScheduleCard"),
-    ("POST", "https://rasp.rea.ru/Home/ScheduleCard"),
-    ("GET",  "https://rasp.rea.ru/Home/ScheduleCard"),
-    ("POST", "https://rasp.rea.ru/Schedule/ScheduleCard"),
-    ("GET",  "https://rasp.rea.ru/Schedule/ScheduleCard"),
-]
-
-BASE_URL = "https://rasp.rea.ru/?q=15.24д-мен01/24б"
+WEEKS_AHEAD = 12
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": BASE_URL,
+    "Accept": "text/html, */*",
+    "Accept-Language": "ru-RU,ru;q=0.9",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": BASE_PAGE,
 }
 
-def fetch_week_html(week_num: int | None):
-    """
-    Пытается получить HTML-таблицу недели из ScheduleCard разными способами.
-    Возвращает (html, resolved_week_num).
-    """
+# ================= ЗАГРУЗКА НЕДЕЛИ =================
+
+def fetch_week(session, week_num=None):
     payload = {"skey": SKEY}
     if week_num is not None:
         payload["weekNum"] = str(week_num)
 
-    last_err = None
+    r = session.post(SCHEDULE_URL, data=payload, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError("ScheduleCard вернул не 200")
 
-    for method, url in CANDIDATES:
-        try:
-            if method == "POST":
-                r = requests.post(url, data=payload, headers=HEADERS, timeout=30)
-            else:
-                r = requests.get(url, params=payload, headers=HEADERS, timeout=30)
+    html = r.text
+    if "view-week" not in html:
+        raise RuntimeError("В ответе нет таблицы расписания")
 
-            if r.status_code != 200:
-                continue
+    m = re.search(r'id="weekNum"\s+value="(\d+)"', html)
+    if not m:
+        raise RuntimeError("Не найден weekNum")
 
-            html = r.text
-            # Быстрая проверка, что это похоже на нужный фрагмент
-            if "view-week" not in html or 'id="weekNum"' not in html:
-                continue
+    return html, int(m.group(1))
 
-            # Вытащим weekNum из hidden input (как в твоём примере)
-            m = re.search(r'id="weekNum"\s+value="(\d+)"', html)
-            resolved = int(m.group(1)) if m else week_num
-            return html, resolved
+# ================= ПАРСИНГ =================
 
-        except Exception as e:
-            last_err = e
-            continue
-
-    raise RuntimeError(f"Не смог получить ScheduleCard. Последняя ошибка: {last_err}")
-
-def parse_week_table(html: str):
+def parse_week(html):
     soup = BeautifulSoup(html, "html.parser")
-
     table = soup.select_one("table.view-week")
     if not table:
         return []
 
-    # Заголовки: соответствие колонка -> дата
-    ths = table.select("thead th")
-    # Первый th пустой, далее идут даты
-    col_dates = []
-    for th in ths[1:]:
-        txt = th.get_text(" ", strip=True)
-        # Ищем dd.mm.yyyy
-        m = re.search(r"(\d{2}\.\d{2}\.\d{4})", txt)
-        if not m:
-            col_dates.append(None)
-        else:
-            col_dates.append(datetime.strptime(m.group(1), "%d.%m.%Y").date())
+    # даты
+    headers = table.select("thead th")[1:]
+    dates = []
+    for th in headers:
+        m = re.search(r"\d{2}\.\d{2}\.\d{4}", th.text)
+        dates.append(datetime.strptime(m.group(), "%d.%m.%Y").date())
 
     events = []
 
-    # Каждая строка slot — это “пара” со временем + ячейки по дням
-    for tr in table.select("tr.slot"):
-        tds = tr.select("td")
-        if not tds:
+    for row in table.select("tr.slot"):
+        cells = row.select("td")
+        if len(cells) < 2:
             continue
 
-        time_td = tds[0]
-        time_lines = [x.strip() for x in time_td.get_text("\n", strip=True).split("\n") if x.strip()]
-        # Пример: ["1 пара", "08:30", "10:00"]
-        if len(time_lines) < 3:
+        times = re.findall(r"\d{2}:\d{2}", cells[0].text)
+        if len(times) != 2:
             continue
-        start_s, end_s = time_lines[1], time_lines[2]
+        start_s, end_s = times
 
-        day_cells = tds[1:]
-
-        for idx, cell in enumerate(day_cells):
-            day_date = col_dates[idx] if idx < len(col_dates) else None
-            if not day_date:
-                continue
-
+        for i, cell in enumerate(cells[1:]):
             a = cell.select_one("a.task")
             if not a:
                 continue
 
-            # Название предмета — первая строка
-            full_lines = [x.strip() for x in a.get_text("\n", strip=True).split("\n") if x.strip()]
-            if not full_lines:
-                continue
+            lines = [l.strip() for l in a.text.split("\n") if l.strip()]
+            subject = lines[0]
 
-            subject = full_lines[0]
+            lesson_type = a.select_one("i")
+            lesson_type = lesson_type.text.strip() if lesson_type else ""
 
-            # Тип занятия в <i>
-            i_tag = a.select_one("i")
-            lesson_type = i_tag.get_text(" ", strip=True) if i_tag else ""
+            location = " ".join(lines[1:]).replace(lesson_type, "").strip()
 
-            # Локация — хвостовые строки после типа
-            # (часто "3 корпус - 103, пл. Основная")
-            location_parts = []
-            for line in full_lines[1:]:
-                # выкинем сам тип, если он совпал
-                if lesson_type and lesson_type in line:
-                    continue
-                location_parts.append(line)
-            location = " ".join(location_parts).strip()
+            start_dt = TZ.localize(datetime.combine(dates[i], datetime.strptime(start_s, "%H:%M").time()))
+            end_dt = TZ.localize(datetime.combine(dates[i], datetime.strptime(end_s, "%H:%M").time()))
 
-            # elementid (если есть) — супер для стабильного UID
-            element_id = a.get("data-elementid", "").strip()
-
-            # Время
-            start_dt = TZ.localize(datetime.combine(day_date, datetime.strptime(start_s, "%H:%M").time()))
-            end_dt = TZ.localize(datetime.combine(day_date, datetime.strptime(end_s, "%H:%M").time()))
+            uid = a.get("data-elementid", subject) + start_dt.isoformat()
 
             events.append({
-                "subject": subject,
+                "name": subject,
                 "type": lesson_type,
                 "location": location,
                 "start": start_dt,
                 "end": end_dt,
-                "uid": f"rea-{element_id or subject}-{day_date.isoformat()}-{start_s}",
+                "uid": uid,
             })
 
     return events
+
+# ================= ICS =================
 
 def build_ics(events):
     cal = Calendar()
     for e in events:
         ev = Event()
-        ev.name = e["subject"]
+        ev.name = e["name"]
         ev.begin = e["start"]
         ev.end = e["end"]
         ev.uid = e["uid"]
-        desc = e["type"].strip()
-        if desc:
-            ev.description = desc
+        if e["type"]:
+            ev.description = e["type"]
         if e["location"]:
             ev.location = e["location"]
         cal.events.add(ev)
     return cal
 
-def main():
-    # 1) Забираем “текущую” неделю: пробуем без weekNum, а сервер сам вернёт weekNum в hidden input
-    html, current_week = fetch_week_html(week_num=None)
+# ================= MAIN =================
 
-    # 2) Сколько недель выгружать вперёд (можешь поменять)
-    WEEKS_AHEAD = 12
+def main():
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # первый заход — как браузер
+    session.get(BASE_PAGE, timeout=30)
+
+    html, current_week = fetch_week(session)
 
     all_events = []
-    # включая текущую
     for w in range(current_week, current_week + WEEKS_AHEAD):
-        week_html, _ = fetch_week_html(week_num=w)
-        all_events.extend(parse_week_table(week_html))
+        html, _ = fetch_week(session, w)
+        all_events.extend(parse_week(html))
 
     cal = build_ics(all_events)
 
     with open("schedule.ics", "w", encoding="utf-8") as f:
         f.writelines(cal)
 
-    print(f"OK: событий {len(all_events)} (week {current_week}..{current_week+WEEKS_AHEAD-1})")
+    print(f"OK: {len(all_events)} событий")
 
 if __name__ == "__main__":
     main()
