@@ -7,7 +7,11 @@ import pytz
 
 # ================= НАСТРОЙКИ =================
 
-SKEY = "15.24д-мен01/24б"
+from urllib.parse import quote
+
+SKEY_RAW = "15.24д-мен01/24б"
+SKEY = quote(SKEY_RAW)
+
 BASE_PAGE = f"https://rasp.rea.ru/?q={SKEY}"
 SCHEDULE_URL = "https://rasp.rea.ru/ScheduleCard"
 TZ = pytz.timezone("Europe/Moscow")
