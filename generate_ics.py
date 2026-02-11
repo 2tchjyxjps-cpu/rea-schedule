@@ -4,60 +4,42 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from ics import Calendar, Event
 import pytz
-
-# ================= НАСТРОЙКИ =================
-
 from urllib.parse import quote
 
-SKEY_RAW = "15.24д-мен01/24б"
-SKEY = quote(SKEY_RAW)
+# ===== НАСТРОЙКИ =====
 
-BASE_PAGE = f"https://rasp.rea.ru/?q={SKEY}"
-SCHEDULE_URL = "https://rasp.rea.ru/ScheduleCard"
+GROUP_RAW = "15.24д-мен01/24б"
+GROUP = quote(GROUP_RAW)
+URL = f"https://rasp.rea.ru/?q={GROUP}"
+
 TZ = pytz.timezone("Europe/Moscow")
-WEEKS_AHEAD = 12
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-    "Accept": "text/html, */*",
+    "Accept": "text/html,application/xhtml+xml",
     "Accept-Language": "ru-RU,ru;q=0.9",
-    "X-Requested-With": "XMLHttpRequest",
-    "Referer": BASE_PAGE,
 }
 
-# ================= ЗАГРУЗКА НЕДЕЛИ =================
+# ===== ЗАГРУЗКА СТРАНИЦЫ =====
 
-def fetch_week(session, week_num=None):
-    payload = {"skey": SKEY}
-    if week_num is not None:
-        payload["weekNum"] = str(week_num)
-
-    r = session.post(SCHEDULE_URL, data=payload, timeout=30)
+def fetch_page():
+    r = requests.get(URL, headers=HEADERS, timeout=30)
     if r.status_code != 200:
-        raise RuntimeError("ScheduleCard вернул не 200")
+        raise RuntimeError("Не удалось загрузить страницу расписания")
+    return r.text
 
-    html = r.text
-    if "view-week" not in html:
-        raise RuntimeError("В ответе нет таблицы расписания")
+# ===== ПАРСИНГ =====
 
-    m = re.search(r'id="weekNum"\s+value="(\d+)"', html)
-    if not m:
-        raise RuntimeError("Не найден weekNum")
-
-    return html, int(m.group(1))
-
-# ================= ПАРСИНГ =================
-
-def parse_week(html):
+def parse_schedule(html):
     soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("table.view-week")
     if not table:
-        return []
+        raise RuntimeError("Таблица расписания не найдена")
 
     # даты
-    headers = table.select("thead th")[1:]
+    ths = table.select("thead th")[1:]
     dates = []
-    for th in headers:
+    for th in ths:
         m = re.search(r"\d{2}\.\d{2}\.\d{4}", th.text)
         dates.append(datetime.strptime(m.group(), "%d.%m.%Y").date())
 
@@ -71,6 +53,7 @@ def parse_week(html):
         times = re.findall(r"\d{2}:\d{2}", cells[0].text)
         if len(times) != 2:
             continue
+
         start_s, end_s = times
 
         for i, cell in enumerate(cells[1:]):
@@ -89,58 +72,36 @@ def parse_week(html):
             start_dt = TZ.localize(datetime.combine(dates[i], datetime.strptime(start_s, "%H:%M").time()))
             end_dt = TZ.localize(datetime.combine(dates[i], datetime.strptime(end_s, "%H:%M").time()))
 
-            uid = a.get("data-elementid", subject) + start_dt.isoformat()
+            uid = f"{subject}-{start_dt.isoformat()}"
 
-            events.append({
-                "name": subject,
-                "type": lesson_type,
-                "location": location,
-                "start": start_dt,
-                "end": end_dt,
-                "uid": uid,
-            })
+            ev = Event()
+            ev.name = subject
+            ev.begin = start_dt
+            ev.end = end_dt
+            ev.uid = uid
+            if lesson_type:
+                ev.description = lesson_type
+            if location:
+                ev.location = location
+
+            events.append(ev)
 
     return events
 
-# ================= ICS =================
-
-def build_ics(events):
-    cal = Calendar()
-    for e in events:
-        ev = Event()
-        ev.name = e["name"]
-        ev.begin = e["start"]
-        ev.end = e["end"]
-        ev.uid = e["uid"]
-        if e["type"]:
-            ev.description = e["type"]
-        if e["location"]:
-            ev.location = e["location"]
-        cal.events.add(ev)
-    return cal
-
-# ================= MAIN =================
+# ===== MAIN =====
 
 def main():
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    html = fetch_page()
+    events = parse_schedule(html)
 
-    # первый заход — как браузер
-    session.get(BASE_PAGE, timeout=30)
-
-    html, current_week = fetch_week(session)
-
-    all_events = []
-    for w in range(current_week, current_week + WEEKS_AHEAD):
-        html, _ = fetch_week(session, w)
-        all_events.extend(parse_week(html))
-
-    cal = build_ics(all_events)
+    cal = Calendar()
+    for e in events:
+        cal.events.add(e)
 
     with open("schedule.ics", "w", encoding="utf-8") as f:
         f.writelines(cal)
 
-    print(f"OK: {len(all_events)} событий")
+    print(f"OK: {len(events)} событий")
 
 if __name__ == "__main__":
     main()
